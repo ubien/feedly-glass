@@ -27,12 +27,14 @@ from google.appengine.api import memcache
 from google.appengine.api import urlfetch
 
 import httplib2
+import json
 from apiclient import errors
 from apiclient.http import MediaIoBaseUpload
 from apiclient.http import BatchHttpRequest
 from oauth2client.appengine import StorageByKeyName
-
-from model import Credentials
+from lib.FeedlySDK.FeedlyApi import FeedlyAPI
+from model import Credentials, FeedlyUser
+from google.appengine.ext import db
 import util
 
 
@@ -54,7 +56,7 @@ For more cat maintenance tips, tap to view the website!</p>
 </article>
 """
 
-
+FEEDLY_AUTH_URL = "http://sandbox.feedly.com/v3/auth/auth?response_type=code&client_id=sandbox&redirect_uri=http://localhost&scope=https%3A%2F%2Fcloud.feedly.com%2Fsubscriptions"
 class _BatchCallback(object):
   """Class used to track batch request responses."""
 
@@ -110,9 +112,24 @@ class MainHandler(webapp2.RequestHandler):
   def get(self):
     """Render the main page."""
     # Get the flash message and delete it.
+    if self.request.get("code"):
+        self._handle_feedly_auth(self.request.get("code"))
     message = memcache.get(key=self.userid)
     memcache.delete(key=self.userid)
     self._render_template(message)
+
+  def _handle_feedly_auth(self, code):
+    print code
+    fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+    resp = fa.getToken(code, 'http://localhost')
+    user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+    print resp
+    if not user:
+        user = FeedlyUser(id=self.userid)
+    user.feedly_access_token=resp['access_token']
+    user.feedly_refresh_token=resp['refresh_token']
+    print "insert "+self.userid
+    user.put()
 
   @util.auth_required
   def post(self):
@@ -275,8 +292,111 @@ class MainHandler(webapp2.RequestHandler):
     self.mirror_service.timeline().delete(id=self.request.get('itemId')).execute()
     return 'A timeline item has been deleted.'
 	
+class FeedlyHandler(webapp2.RequestHandler):
+    def _get_auth_token(self):
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+        if user:
+            return user.feedly_access_token
+        else:
+            return None
+
+    def _is_contact_added(self):
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+        if user:
+            return user.contact_inserted
+        else:
+            return False
+
+    def _contact_added_save(self):
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+        if not user:
+            user = User(id=self.userid)
+        user.contact_inserted = True
+        user.put()
+        memcache.set(self._contact_added_key(), True)
+
+    def _contact_added_key(self):
+        return self.userid+"-contact"
+
+    @util.auth_required
+    def get(self):
+        if not memcache.get(key=self._contact_added_key()):
+            added = self._is_contact_added()
+            memcache.set(self._contact_added_key(), added)
+            if not added:
+                self._insert_pocket_contact()
+                self._contact_added_save()
+
+        if self.request.path == '/subscriptions':
+            self._get_subscriptions()
+
+
+    def _get_subscriptions(self):
+        token = self._get_auth_token()
+        if token:
+            fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+            #self.response.out.write(json.dumps(fa.getSubscription(token=token)))
+            categores = {
+                'Uncategorized' : []
+            }
+            self._insert_bundle_cover('Feedly', 1)
+            subscriptions = fa.getSubscription(token=token)
+            for feed in subscriptions:
+                feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
+                for item in feed_content['items']:
+                    image = None
+                    if 'thumbnail' in item:
+                        image = item['thumbnail'][0]['url']
+                    self._insert_card(item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
+
+    def _insert_pocket_contact(self):
+        id = "Pocket"
+        image_url = "https://www.volacci.com/sites/default/files/20130801_Pocket.png"
+
+        body = {
+            'id': id,
+            'displayName': "Pocket",
+            'imageUrls': [image_url],
+            'acceptCommands': [{ 'type': 'SHARE' }]
+        }
+        self.mirror_service.contacts().insert(body=body).execute()
+
+    def _insert_card(self, title, source, image, link, bundleId):
+        body = {
+            'bundleId' : bundleId,
+        }
+        body['menuItems'] = [{
+            'action': 'OPEN_URI',
+            'payload': link
+            },
+            {'action' : 'SHARE'}
+        ]
+        body['html'] = "<article><h1>"+title+"</h1><h2><i>"+source+"</i></h2></article>"
+        if image:
+          print media_link
+          resp = urlfetch.fetch(image, deadline=20)
+          media = MediaIoBaseUpload(
+              io.BytesIO(resp.content), mimetype='image/jpeg', resumable=True)
+        else:
+          media = None
+
+        self.mirror_service.timeline().insert(body=body, media_body=media).execute()
+
+    def _insert_bundle_cover(self, category, bundleId):
+        body = {
+            'bundleId' : bundleId,
+            'isBundleCover' : True,
+        }
+        body['html'] = "<article><h1>"+category+"</h1>"
+        media_link = "http://upload.wikimedia.org/wikipedia/en/c/ce/Feedly_Logo.png"
+        resp = urlfetch.fetch(media_link, deadline=20)
+        media = MediaIoBaseUpload(
+            io.BytesIO(resp.content), mimetype='image/jpeg', resumable=True)
+        self.mirror_service.timeline().insert(body=body, media_body=media).execute()
 
 
 MAIN_ROUTES = [
-    ('/', MainHandler)
+    ('/', MainHandler),
+    ('/subscriptions', FeedlyHandler),
+
 ]

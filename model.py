@@ -29,3 +29,10 @@ class Credentials(db.Model):
   used by the Storage classes to store OAuth 2.0 credentials in the data store.
   """
   credentials = CredentialsProperty()
+
+
+class FeedlyUser(db.Model):
+  id = db.StringProperty()
+  feedly_access_token = db.StringProperty()
+  feedly_refresh_token = db.StringProperty()
+  contact_inserted = db.BooleanProperty(default=False)
