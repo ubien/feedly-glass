@@ -333,10 +333,9 @@ class FeedlyHandler(webapp2.RequestHandler):
             #for category in categories:
             profile = fa.getProfile(token)
             userId = profile['id']
-            print userId
-            feed_content = fa.getStreamContentUser(token, userId, count=1, unreadOnly='true')
+            feed_content = fa.getStreamContentUser(token, userId, count=10, unreadOnly='true')
             #feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
-            print feed_content
+            markEntryIds = []
             for item in feed_content['items']:
                 print item
                 image = None
@@ -344,7 +343,9 @@ class FeedlyHandler(webapp2.RequestHandler):
                     image = item['thumbnail'][0]['url']
                 elif 'visual' in item and 'url' in item['visual']:
                     image = item['visual']['url']
+                markEntryIds.append(item['id'])
                 self._insert_card(item['id'], item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
+            fa.markAsRead(token, markEntryIds)
 
     def _insert_card(self, id, title, source, image, link, bundleId):
         body = {
