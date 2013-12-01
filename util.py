@@ -98,3 +98,5 @@ def auth_required(handler_method):
           credentials_entity.delete()
     self.redirect('/auth')
   return check_auth
+
+

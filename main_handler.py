@@ -300,38 +300,20 @@ class FeedlyHandler(webapp2.RequestHandler):
         else:
             return None
 
-    def _is_contact_added(self):
-        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
-        if user:
-            return user.contact_inserted
+    def _get_mime_type(self, image_url):
+        if '.png' in image_url:
+            return "image/png"
+        elif '.bmp' in image_url:
+            return "image/bmp"
         else:
-            return False
-
-    def _contact_added_save(self):
-        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
-        if not user:
-            user = User(id=self.userid)
-        user.contact_inserted = True
-        user.put()
-        memcache.set(self._contact_added_key(), True)
-
-    def _contact_added_key(self):
-        return self.userid+"-contact"
+            return "image/jpeg"
 
     @util.auth_required
     def get(self):
-        if not memcache.get(key=self._contact_added_key()):
-            added = self._is_contact_added()
-            memcache.set(self._contact_added_key(), added)
-            if not added:
-                self._insert_pocket_contact()
-                self._contact_added_save()
+        if self.request.path == '/feeds':
+            self._get_stream()
 
-        if self.request.path == '/subscriptions':
-            self._get_subscriptions()
-
-
-    def _get_subscriptions(self):
+    def _get_stream(self):
         token = self._get_auth_token()
         if token:
             fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
@@ -339,47 +321,60 @@ class FeedlyHandler(webapp2.RequestHandler):
             categores = {
                 'Uncategorized' : []
             }
+            
+            self._subscribeTimelineEvent()
+            #self._clearTimeline()
+
             self._insert_bundle_cover('Feedly', 1)
-            subscriptions = fa.getSubscription(token=token)
-            for feed in subscriptions:
-                feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
+            categories = fa.getCategories(token=token)
+            #subscriptions = fa.getSubscription(token=token)
+            for category in categories:
+                feed_content = fa.getStreamMixsContent(token, category['id'], count=1, unreadOnly=True, newerThan=None, hours=None)
+                #feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
                 for item in feed_content['items']:
+                    print item
                     image = None
                     if 'thumbnail' in item:
                         image = item['thumbnail'][0]['url']
-                    self._insert_card(item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
+                    elif 'visual' in item and 'url' in item['visual']:
+                        image = item['visual']['url']
+                    self._insert_card(item['id'], item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
 
-    def _insert_pocket_contact(self):
-        id = "Pocket"
-        image_url = "https://www.volacci.com/sites/default/files/20130801_Pocket.png"
-
-        body = {
-            'id': id,
-            'displayName': "Pocket",
-            'imageUrls': [image_url],
-            'acceptCommands': [{ 'type': 'SHARE' }]
-        }
-        self.mirror_service.contacts().insert(body=body).execute()
-
-    def _insert_card(self, title, source, image, link, bundleId):
+    def _insert_card(self, id, title, source, image, link, bundleId):
         body = {
             'bundleId' : bundleId,
+            'menuItems' : [{
+                    'action': 'OPEN_URI',
+                    'payload': link
+                },
+                {   'action' : 'CUSTOM',
+                    'id': 'save',
+                    'payload' : link,
+                    'values' : [{'displayName' : 'Save For Later',
+                              'iconUrl': 'http://files.softicons.com/download/system-icons/web0.2ama-icons-by-chrfb/png/128x128/Bookmark.png'
+                            }
+                    ]
+                },
+                {   'action' : 'CUSTOM',
+                    'id': 'pocket',
+                    'payload' : link,
+                    'values' : [{'displayName' : 'Add To Pocket',
+                              'iconUrl': 'http://3.bp.blogspot.com/-OTaixNGesIU/T45FQHvE8zI/AAAAAAAACUE/IB6Gd4y-MNQ/s1600/128.png'
+                            }
+                    ]
+                }
+            ],
+            'html' : "<article><h1>"+title+"</h1><h2><i>"+source+"</i></h2>"
         }
-        body['menuItems'] = [{
-            'action': 'OPEN_URI',
-            'payload': link
-            },
-            {'action' : 'SHARE'}
-        ]
-        body['html'] = "<article><h1>"+title+"</h1><h2><i>"+source+"</i></h2></article>"
+
         if image:
-          print media_link
-          resp = urlfetch.fetch(image, deadline=20)
-          media = MediaIoBaseUpload(
-              io.BytesIO(resp.content), mimetype='image/jpeg', resumable=True)
+            body['html'] += '<img src="'+image+'" />'
+            resp = urlfetch.fetch(image, deadline=20)
+            media = MediaIoBaseUpload(
+                io.BytesIO(resp.content), mimetype=self._get_mime_type(image), resumable=True)
         else:
           media = None
-
+        body['html'] += "</article>"
         self.mirror_service.timeline().insert(body=body, media_body=media).execute()
 
     def _insert_bundle_cover(self, category, bundleId):
@@ -387,16 +382,59 @@ class FeedlyHandler(webapp2.RequestHandler):
             'bundleId' : bundleId,
             'isBundleCover' : True,
         }
-        body['html'] = "<article><h1>"+category+"</h1>"
-        media_link = "http://upload.wikimedia.org/wikipedia/en/c/ce/Feedly_Logo.png"
+        media_link = "http://glass-apps.org/wp-content/uploads/2013/03/feedly-logo1.png"
+        body['html'] = "<article><h1>"+category+'</h1><img src="'+media_link+'" /></article>'
         resp = urlfetch.fetch(media_link, deadline=20)
         media = MediaIoBaseUpload(
-            io.BytesIO(resp.content), mimetype='image/jpeg', resumable=True)
+            io.BytesIO(resp.content), mimetype=self._get_mime_type(media_link), resumable=True)
         self.mirror_service.timeline().insert(body=body, media_body=media).execute()
 
+    def post(self):
+        logging.info('SavePocket')
+        data = json.loads(self.request.body)
+        print data
+        actions  = data.get('userActions', [])
+        for action in actions:
+            if action['payload'] == 'save':
+                credentials = StorageByKeyName(Credentials, data['userToken'], 'credentials').get()
+                if credentials:
+                    mirror_service = util.create_service('mirror', 'v1', credentials)
+                    timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
+                    print timeline_item
+
+        self.response.set_status(200)
+        self.response.out.write("")
+
+    def _subscribeTimelineEvent(self):
+        #callback_url = 'https://mirrornotifications.appspot.com/forward?url=http://ec2-23-20-178-62.compute-1.amazonaws.com:28000/subscriptions'
+        callback_url = 'https://feedly-glass.appspot.com/subscriptions'
+        subscriptions = self.mirror_service.subscriptions().list().execute()
+        should_set = True
+        for subscription in subscriptions.get('items', []):
+            if subscription.get('collection') == 'timeline':
+                if subscription['callbackUrl'] == callback_url or subscription['userToken'] == self.userid:
+                    should_set = False
+
+        if should_set:
+            body = {
+                'collection': 'timeline',
+                'userToken': self.userid,
+                'callbackUrl': callback_url
+            }
+            self.mirror_service.subscriptions().insert(body=body).execute()
+
+    def _clearTimeline(self):
+        timeline_items = self.mirror_service.timeline().list(maxResults=20).execute()
+        cards = timeline_items.get('items', [])
+        for card in cards:
+            self._clearTimelineItem(card['id'])
+
+    def _clearTimelineItem(self, id):
+        self.mirror_service.timeline().delete(id=id).execute()
 
 MAIN_ROUTES = [
     ('/', MainHandler),
+    ('/feeds', FeedlyHandler),
     ('/subscriptions', FeedlyHandler),
 
 ]

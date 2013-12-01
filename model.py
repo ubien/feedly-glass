@@ -35,4 +35,3 @@ class FeedlyUser(db.Model):
   id = db.StringProperty()
   feedly_access_token = db.StringProperty()
   feedly_refresh_token = db.StringProperty()
-  contact_inserted = db.BooleanProperty(default=False)
