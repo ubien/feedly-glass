@@ -293,8 +293,10 @@ class MainHandler(webapp2.RequestHandler):
     return 'A timeline item has been deleted.'
 	
 class FeedlyHandler(webapp2.RequestHandler):
-    def _get_auth_token(self):
-        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+    def _get_auth_token(self, userId=None):
+        if not userId:
+            userId = self.userid
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", userId).get()
         if user:
             return user.feedly_access_token
         else:
@@ -325,24 +327,29 @@ class FeedlyHandler(webapp2.RequestHandler):
             self._subscribeTimelineEvent()
             #self._clearTimeline()
 
-            self._insert_bundle_cover('Feedly', 1)
+            #self._insert_bundle_cover('Feedly', 1)
             categories = fa.getCategories(token=token)
             #subscriptions = fa.getSubscription(token=token)
-            for category in categories:
-                feed_content = fa.getStreamMixsContent(token, category['id'], count=1, unreadOnly=True, newerThan=None, hours=None)
-                #feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
-                for item in feed_content['items']:
-                    print item
-                    image = None
-                    if 'thumbnail' in item:
-                        image = item['thumbnail'][0]['url']
-                    elif 'visual' in item and 'url' in item['visual']:
-                        image = item['visual']['url']
-                    self._insert_card(item['id'], item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
+            #for category in categories:
+            profile = fa.getProfile(token)
+            userId = profile['id']
+            print userId
+            feed_content = fa.getStreamContentUser(token, userId, count=1, unreadOnly='true')
+            #feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
+            print feed_content
+            for item in feed_content['items']:
+                print item
+                image = None
+                if 'thumbnail' in item:
+                    image = item['thumbnail'][0]['url']
+                elif 'visual' in item and 'url' in item['visual']:
+                    image = item['visual']['url']
+                self._insert_card(item['id'], item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
 
     def _insert_card(self, id, title, source, image, link, bundleId):
         body = {
             'bundleId' : bundleId,
+            'sourceItemId' : id,
             'menuItems' : [{
                     'action': 'OPEN_URI',
                     'payload': link
@@ -362,12 +369,15 @@ class FeedlyHandler(webapp2.RequestHandler):
                               'iconUrl': 'http://3.bp.blogspot.com/-OTaixNGesIU/T45FQHvE8zI/AAAAAAAACUE/IB6Gd4y-MNQ/s1600/128.png'
                             }
                     ]
+                },
+                {
+                    'action' : 'DELETE'
                 }
             ],
             'html' : "<article><h1>"+title+"</h1><h2><i>"+source+"</i></h2>"
         }
 
-        if image:
+        if image and image != 'none':
             body['html'] += '<img src="'+image+'" />'
             resp = urlfetch.fetch(image, deadline=20)
             media = MediaIoBaseUpload(
@@ -392,22 +402,28 @@ class FeedlyHandler(webapp2.RequestHandler):
     def post(self):
         logging.info('SavePocket')
         data = json.loads(self.request.body)
+        print "post"
         print data
         actions  = data.get('userActions', [])
         for action in actions:
-            if action['payload'] == 'save':
+            if 'payload' in action and action['payload'] == 'save':
                 credentials = StorageByKeyName(Credentials, data['userToken'], 'credentials').get()
                 if credentials:
                     mirror_service = util.create_service('mirror', 'v1', credentials)
                     timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
+                    print 'save to feedly'
                     print timeline_item
+                    token = self._get_auth_token(data['userToken'])
+                    if token:
+                        fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+                        fa.addTagSave(timeline_item['sourceItemId'], token)
 
         self.response.set_status(200)
         self.response.out.write("")
 
     def _subscribeTimelineEvent(self):
-        #callback_url = 'https://mirrornotifications.appspot.com/forward?url=http://ec2-23-20-178-62.compute-1.amazonaws.com:28000/subscriptions'
-        callback_url = 'https://feedly-glass.appspot.com/subscriptions'
+        callback_url = 'https://mirrornotifications.appspot.com/forward?url=http://ec2-23-20-178-62.compute-1.amazonaws.com:28000/subscriptions'
+        #callback_url = 'https://feedly-glass.appspot.com/subscriptions'
         subscriptions = self.mirror_service.subscriptions().list().execute()
         should_set = True
         for subscription in subscriptions.get('items', []):
