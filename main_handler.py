@@ -28,6 +28,7 @@ from google.appengine.api import urlfetch
 
 import httplib2
 import json
+from random import randint
 from apiclient import errors
 from apiclient.http import MediaIoBaseUpload
 from apiclient.http import BatchHttpRequest
@@ -315,46 +316,67 @@ class FeedlyHandler(webapp2.RequestHandler):
         if self.request.path == '/feeds':
             self._refresh_stream(self.mirror_service)
 
+    def _get_source_id(self, feedlyUserId, feedlyItemId):
+        return feedlyUserId + "#*#" + feedlyItemId
+
+    def _parse_source_id(self, id):
+        pieces = id.split("#*#")
+        return {
+            'userId' : pieces[0],
+            'entryId' : pieces[1]
+        }
+
+    def _get_refresh_id(self, feedlyUserId):
+        return feedlyUserId + "#REFRESH#"+str(randint(1,1000))
 
     def _refresh_stream(self, mirror_service, token=None):
         if not token:
             token = self._get_auth_token()
         if token:
             fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
-            #self.response.out.write(json.dumps(fa.getSubscription(token=token)))
-            categores = {
-                'Uncategorized' : []
-            }
-            
-            self._subscribeTimelineEvent(mirror_service)
-            self._clearTimeline(mirror_service)
-            self._insert_refresh_card(1, mirror_service)
-            #self._insert_bundle_cover('Feedly', 1)
-            #categories = fa.getCategories(token=token)
-            #subscriptions = fa.getSubscription(token=token)
-            #for category in categories:
             profile = fa.getProfile(token)
             userId = profile['id']
+            self._subscribeTimelineEvent(mirror_service)
+            self._clearTimeline(mirror_service)
+            cardCover = self._create_bundle_cover(1)
+            cardRefresh = self._create_refresh_card(self._get_refresh_id(userId), 1)
+            batch = BatchHttpRequest()
+            batch.add(
+                mirror_service.timeline().insert(body=cardCover),
+                request_id=str(userId)+'-cover')
+            batch.add(
+                mirror_service.timeline().insert(body=cardRefresh),
+                request_id=str(userId)+'-refresh')
             feed_content = fa.getStreamContentUser(token, userId, count=5, unreadOnly='true')
-            #feed_content = fa.getStreamContent(token, feed['id'], count=1, ranked="newest", unreadOnly=True, newerThan=None, continuation=None)
-            markEntryIds = []
-            for item in feed_content['items']:
-                print item
-                image = None
-                if 'thumbnail' in item:
-                    image = item['thumbnail'][0]['url']
-                elif 'visual' in item and 'url' in item['visual']:
-                    image = item['visual']['url']
-                markEntryIds.append(item['id'])
-                self._insert_card(item['id'], item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1, mirror_service)
-            fa.markAsRead(token, markEntryIds)
+
+            if feed_content['items']:
+                markEntryIds = []
+                for item in feed_content['items']:
+                    print item['title']
+                    image = None
+                    if 'thumbnail' in item:
+                        image = item['thumbnail'][0]['url']
+                    elif 'visual' in item and 'url' in item['visual']:
+                        image = item['visual']['url']
+                    markEntryIds.append(item['id'])
+                    source_id = self._get_source_id(userId,item['id'])
+                    body = self._create_card(source_id, item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
+                    batch.add(
+                        mirror_service.timeline().insert(body=body),
+                        request_id=item['id'])
+                batch.execute(httplib2.Http())
+                fa.markAsRead(token, markEntryIds)
 
 
-    def _insert_card(self, id, title, source, image, link, bundleId, mirror_service):
+    def _create_card(self, id, title, source, image, link, bundleId):
+        html = "<article class=\"photo\">\n"
+        if image:
+            html += '<img src="'+image+'" width="100%" height="100%"><div class="photo-overlay"/>'
+        html += '<section><div class="text-x-large"><p><strong class="blue">'+title+'</strong></div></section><footer><div><em class="yellow">'+source+'</em></p></div></footer></article>'
+
         body = {
             'bundleId' : bundleId,
             'sourceItemId' : id,
-            'notification': {'level': 'DEFAULT'}, 
             'menuItems' : [{
                     'action': 'OPEN_URI',
                     'payload': link
@@ -367,46 +389,39 @@ class FeedlyHandler(webapp2.RequestHandler):
                             }
                     ]
                 },
-                {   'action' : 'CUSTOM',
-                    'id': 'pocket',
-                    'payload' : link,
-                    'values' : [{'displayName' : 'Add To Pocket',
-                              'iconUrl': 'http://3.bp.blogspot.com/-OTaixNGesIU/T45FQHvE8zI/AAAAAAAACUE/IB6Gd4y-MNQ/s1600/128.png'
-                            }
-                    ]
-                },
+#                {   'action' : 'CUSTOM',
+#                    'id': 'pocket',
+#                    'payload' : link,
+#                    'values' : [{'displayName' : 'Add To Pocket',
+#                              'iconUrl': 'http://3.bp.blogspot.com/-OTaixNGesIU/T45FQHvE8zI/AAAAAAAACUE/IB6Gd4y-MNQ/s1600/128.png'
+#                            }
+#                    ]
+#                },
                 {
                     'action' : 'DELETE'
                 }
             ],
-            'html' : "<article><h1>"+title+"</h1><h2><i>"+source+"</i></h2>"
+            'html' : html
         }
+        return body
 
-        if image and image != 'none':
-            body['html'] += '<img src="'+image+'" />'
-            resp = urlfetch.fetch(image, deadline=20)
-            media = MediaIoBaseUpload(
-                io.BytesIO(resp.content), mimetype=self._get_mime_type(image), resumable=True)
-        else:
-          media = None
-        body['html'] += "</article>"
-        mirror_service.timeline().insert(body=body, media_body=media).execute()
-
-    def _insert_bundle_cover(self, category, bundleId, mirror_service):
+    def _create_bundle_cover(self, bundleId):
         body = {
             'bundleId' : bundleId,
             'isBundleCover' : True,
-        }
-        media_link = "http://glass-apps.org/wp-content/uploads/2013/03/feedly-logo1.png"
-        body['html'] = "<article><h1>"+category+'</h1><img src="'+media_link+'" /></article>'
-        resp = urlfetch.fetch(media_link, deadline=20)
-        media = MediaIoBaseUpload(
-            io.BytesIO(resp.content), mimetype=self._get_mime_type(media_link), resumable=True)
-        mirror_service.timeline().insert(body=body, media_body=media).execute()
+            'notification': {'level': 'DEFAULT'},
+            'html' : '<img src="http://glass-apps.org/wp-content/uploads/2013/03/feedly-logo1.png" width="100%" height="100%"><section><p class="text-auto-size white">Feedly</p></section>',
 
-    def _insert_refresh_card(self, bundleId, mirror_service):
+        }
+        return body
+
+    def _create_refresh_card(self, id, bundleId):
+        print "refresh id:"+str(id)
+        memcache.set(key=id, value=True)
         body = {
             'bundleId' : bundleId,
+            'sourceItemId' : id,
+            'html' : '<img src="http://blog.cachinko.com/blog/wp-content/uploads/2012/02/refresh.png" width="100%" height="100%"><div class="photo-overlay"/><section><p class="text-auto-size white">Refresh</p></section>',
             'menuItems' : [
                 {   'action' : 'CUSTOM',
                     'id': 'refresh',
@@ -419,36 +434,30 @@ class FeedlyHandler(webapp2.RequestHandler):
                     'action' : 'DELETE'
                 }]
         }
-        media_link = "http://blog.cachinko.com/blog/wp-content/uploads/2012/02/refresh.png"
-        body['text'] = "Refresh"
-        resp = urlfetch.fetch(media_link, deadline=20)
-        media = MediaIoBaseUpload(
-            io.BytesIO(resp.content), mimetype=self._get_mime_type(media_link), resumable=True)
-        mirror_service.timeline().insert(body=body, media_body=media).execute()
+        return body
 
     def post(self):
-        logging.info('SavePocket')
         data = json.loads(self.request.body)
-        print "post"
-        print data
         actions  = data.get('userActions', [])
         for action in actions:
             if 'payload' in action:
                 credentials = StorageByKeyName(Credentials, data['userToken'], 'credentials').get()
-                if credentials:
+                token = self._get_auth_token(data['userToken'])
+                if credentials and token:
                     mirror_service = util.create_service('mirror', 'v1', credentials)
-                    token = self._get_auth_token(data['userToken'])
+                    timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
                     if  action['payload'] == 'save':
                         print 'save to feedly'
-                        timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
-                        if token:
-                            fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
-                            fa.addTagSave(timeline_item['sourceItemId'], token)
-
+                        fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+                        id_parts = self._parse_source_id(timeline_item['sourceItemId'])
+                        fa.addTagSave(id_parts['userId'], id_parts['entryId'], token)
                     elif action['payload'] == 'refresh':
-                        print 'refresh items'
-                        self._refresh_stream(mirror_service, token=token)
-
+                        print timeline_item['sourceItemId']
+                        if memcache.get(key=timeline_item['sourceItemId']):
+                            memcache.delete(timeline_item['sourceItemId'])
+                            print 'refresh items'
+                            print data
+                            self._refresh_stream(mirror_service, token=token)
         self.response.set_status(200)
         self.response.out.write("")
 
@@ -473,13 +482,15 @@ class FeedlyHandler(webapp2.RequestHandler):
     def _clearTimeline(self, mirror_service):
         timeline_items = mirror_service.timeline().list(maxResults=20).execute()
         cards = timeline_items.get('items', [])
-        for card in cards:
-            if (not 'isBundleCover' in card) or ('isBundleCover' in card and not card['isBundleCover']):
-                print card
-                self._clearTimelineItem(card['id'], mirror_service)
 
-    def _clearTimelineItem(self, id, mirror_service):
-        mirror_service.timeline().delete(id=id).execute()
+        if cards:
+            batch_responses = _BatchCallback()
+            batch = BatchHttpRequest(batch_responses.callback)
+            for card in cards:
+              batch.add(
+                  mirror_service.timeline().delete(id=card['id']),
+                  request_id=card['id'])
+            batch.execute(httplib2.Http())
 
 MAIN_ROUTES = [
     ('/', MainHandler),
