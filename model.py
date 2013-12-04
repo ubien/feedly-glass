@@ -21,7 +21,6 @@ from google.appengine.ext import db
 
 from oauth2client.appengine import CredentialsProperty
 
-
 class Credentials(db.Model):
   """Datastore entity for storing OAuth2.0 credentials.
 

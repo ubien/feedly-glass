@@ -42,7 +42,7 @@ import util
 jinja_environment = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
 
-FEEDLY_AUTH_URL = "http://sandbox.feedly.com/v3/auth/auth?response_type=code&client_id=sandbox&redirect_uri=http://localhost&scope=https%3A%2F%2Fcloud.feedly.com%2Fsubscriptions"
+FEEDLY_SECRET = None
 class _BatchCallback(object):
   """Class used to track batch request responses."""
 
@@ -68,13 +68,47 @@ class LandingPage(webapp2.RequestHandler):
     def get(self):
         if self.request.get("code"):
             self._handle_feedly_auth(self.request.get("code"))
-        else:
-            template = jinja_environment.get_template('templates/index.html')
-            self.response.out.write(template.render())
+
+        template_variables = {
+            'google_auth' : util.auth_required(self),
+            'feedly_auth' : False
+        }
+
+        if template_variables['google_auth']:
+            template_variables['feedly_auth'] = self._check_feedly_auth()
+
+            
+        template = jinja_environment.get_template('templates/index.html')
+        self.response.out.write(template.render(template_variables))
+
+    @util.auth_required
+    def _check_feedly_auth(self):
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+        if user and user.feedly_access_token != '':
+            return True
+        return False
+
+    @util.auth_required
+    def _handle_feedly_auth(self, code):
+        print code
+        fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
+        resp = fa.getToken(code, 'http://localhost')
+        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
+        print resp
+        if 'access_token' in resp:
+            if not user:
+                user = FeedlyUser(id=self.userid)
+            user.feedly_access_token=resp['access_token']
+            user.feedly_refresh_token=resp['refresh_token']
+            print "insert "+self.userid
+            user.put()
+
+
 
 class FeedlyHandler(webapp2.RequestHandler):
+
     @util.auth_required
-    def get_feeds(self):
+    def get(self):
         self._refresh_stream(self.mirror_service)
 
     def post(self):
@@ -89,7 +123,7 @@ class FeedlyHandler(webapp2.RequestHandler):
                     timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
                     if  action['payload'] == 'save':
                         print 'save to feedly'
-                        fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+                        fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
                         id_parts = self._parse_source_id(timeline_item['sourceItemId'])
                         fa.addTagSave(id_parts['userId'], id_parts['entryId'], token)
                     elif action['payload'] == 'refresh':
@@ -101,21 +135,6 @@ class FeedlyHandler(webapp2.RequestHandler):
                             self._refresh_stream(mirror_service, token=token)
         self.response.set_status(200)
         self.response.out.write("")
-
-    def _handle_feedly_auth(self, code):
-        print code
-        fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
-        resp = fa.getToken(code, 'http://localhost')
-        user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
-        print resp
-        if not user:
-            user = FeedlyUser(id=self.userid)
-        user.feedly_access_token=resp['access_token']
-        user.feedly_refresh_token=resp['refresh_token']
-        print "insert "+self.userid
-        user.put()
-
-
 
     def _get_auth_token(self, userId=None):
         if not userId:
@@ -151,7 +170,7 @@ class FeedlyHandler(webapp2.RequestHandler):
         if not token:
             token = self._get_auth_token()
         if token:
-            fa = FeedlyAPI('sandbox', 'Z5ZSFRASVWCV3EFATRUY')
+            fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
             profile = fa.getProfile(token)
             userId = profile['id']
             self._subscribeTimelineEvent(mirror_service)

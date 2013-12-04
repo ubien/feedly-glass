@@ -2,11 +2,30 @@
     <head>
         <meta http-equiv="content-type" content="text/html; charset=UTF-8">
         <meta charset="utf-8">
-        <title>(UnOfficial) Feedly Integration for Google Glass</title>
+        <title>(Unofficial) Feedly Integration for Google Glass</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
         <link href="//netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap.min.css" rel="stylesheet">
+        <link href="/static/main.css" rel="stylesheet">
     </head>
     <body>
+        <div class="jumbotron">
+            <div class="container">
+                <h1>(Unofficial) Feedly Glassware</h1>
+                <p>Built using the Mirror API, using Google's python quickstart guide as a reference (https://github.com/googleglass/mirror-quickstart-python)</p>
+                <p>Source code can be found here https://github.com/ubien/feedly-glass</p>
+                {% if google_auth %}
+                    <p><a class="btn btn-success btn-lg" role="button" href="#" >Google Glass Authenticated</a></p>
+                {% else %}
+                    <p><a class="btn btn-primary btn-lg" role="button" href="/auth" >Auth for Google Glass »</a></p>
+                {% endif %}
+                {% if google_auth and not feedly_auth %}
+                <p><a class="btn btn-primary btn-lg" role="button" href="http://sandbox.feedly.com/v3/auth/auth?response_type=code&client_id=sandbox&redirect_uri=http://localhost&scope=https%3A%2F%2Fcloud.feedly.com%2Fsubscriptions">Auth for Feedly »</a></p>
+                {% elif feedly_auth %}
+                <p><a class="btn btn-success btn-lg" role="button" href="#">Feedly Authenticated</a></p>
+                <p><a class="btn  btn-primary btn-lg" role="button" href="/feeds">Push to Glass</a></p>
+                {% endif %}
+            </div>
+        </div>
         <div id="Carousel" class="carousel slide col-lg-8 col-offset-2">
             <ol class="carousel-indicators">
                 <li data-target="Carousel" data-slide-to="0" class="active"></li>
@@ -21,19 +40,19 @@
                 <div class="item active">
                     <img src="/static/img/cover-card.png" alt="Glass Cover Card" class="img-responsive">
                     <div class="carousel-caption">
-                        Card as it appears in your timeline.  Select to drill into items
+                        Card as it appears in your timeline.  Select to view articles.
                     </div>
                 </div>
                 <div class="item ">
                     <img src="/static/img/card-1.png" alt="Glass Cover Card" class="img-responsive">
                     <div class="carousel-caption">
-                        First RSS item
+                        First RSS article
                     </div>
                 </div>
                 <div class="item">
                     <img src="/static/img/card-2.png" alt="Glass Cover Card" class="img-responsive">
                     <div class="carousel-caption">
-                        2/10
+                        2nd article of 10...
                     </div>
                 </div>
                 <div class="item">
@@ -51,7 +70,7 @@
                     <div class="item">
                     <img src="/static/img/card-refresh.png" alt="Glass Cover Card" class="img-responsive">
                     <div class="carousel-caption">
-                        At the end you can refresh and get new cards.  Delivered cards are marked as read in Feedly.
+                        At the end you can refresh to get new cards.  Delivered cards are marked as read in Feedly.
                     </div>
                 </div>
             </div>
