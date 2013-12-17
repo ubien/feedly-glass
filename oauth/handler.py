@@ -92,7 +92,7 @@ class OAuthCodeExchangeHandler(OAuthBaseRequestHandler):
     logging.info('Successfully stored credentials for user: %s', userid)
     util.store_userid(self, userid)
 
-    self._perform_post_auth_tasks(userid, creds)
+    #self._perform_post_auth_tasks(userid, creds)
     self.redirect('/')
 
   def _perform_post_auth_tasks(self, userid, creds):

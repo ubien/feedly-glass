@@ -17,17 +17,16 @@
 __author__ = 'alainv@google.com (Alain Vongsouvanh)'
 
 
-import io
 import jinja2
 import logging
 import os
 import webapp2
 
 from google.appengine.api import memcache
-from google.appengine.api import urlfetch
 
 import httplib2
 import json
+from FeedlyKey import FEEDLY_USER, FEEDLY_SECRET
 from random import randint
 from apiclient import errors
 from apiclient.http import MediaIoBaseUpload
@@ -42,7 +41,7 @@ import util
 jinja_environment = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
 
-FEEDLY_SECRET = "QNFQRFCFM1IQCJB367ON"
+FEEDLY_REDIRECT = "https://feedly-glass.appspot.com" #http://localhost
 class _BatchCallback(object):
   """Class used to track batch request responses."""
 
@@ -71,7 +70,9 @@ class LandingPage(webapp2.RequestHandler):
 
         template_variables = {
             'google_auth' : util.auth_required(self),
-            'feedly_auth' : False
+            'feedly_auth' : False,
+            'feedly_client_id' : FEEDLY_USER,
+            'feedly_redir' : FEEDLY_REDIRECT
         }
 
         if template_variables['google_auth']:
@@ -90,16 +91,16 @@ class LandingPage(webapp2.RequestHandler):
 
     @util.auth_required
     def _handle_feedly_auth(self, code):
-        fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
-        resp = fa.getToken(code, 'http://localhost')
+        fa = FeedlyAPI(FEEDLY_USER, FEEDLY_SECRET)
+        resp = fa.getToken(code, FEEDLY_REDIRECT)
         user = db.GqlQuery("SELECT * FROM FeedlyUser WHERE id = :1", self.userid).get()
-        print resp
+        logging.debug(resp)
         if 'access_token' in resp:
             if not user:
                 user = FeedlyUser(id=self.userid)
             user.feedly_access_token=resp['access_token']
             user.feedly_refresh_token=resp['refresh_token']
-            print "insert "+self.userid
+            logging.debug("insert "+str(self.userid))
             user.put()
 
 
@@ -109,8 +110,6 @@ class FeedlyHandler(webapp2.RequestHandler):
     @util.auth_required
     def get(self):
         self._refresh_stream(self.mirror_service)
-        self.mirror_service.contacts().delete(
-        id='python-quick-start').execute()
 
     def post(self):
         data = json.loads(self.request.body)
@@ -123,16 +122,16 @@ class FeedlyHandler(webapp2.RequestHandler):
                     mirror_service = util.create_service('mirror', 'v1', credentials)
                     timeline_item = mirror_service.timeline().get(id=data['itemId']).execute()
                     if  action['payload'] == 'save':
-                        print 'save to feedly'
-                        fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
+                        logging.debug('save to feedly')
+                        fa = FeedlyAPI(FEEDLY_USER, FEEDLY_SECRET)
                         id_parts = self._parse_source_id(timeline_item['sourceItemId'])
                         fa.addTagSave(id_parts['userId'], id_parts['entryId'], token)
                     elif action['payload'] == 'refresh':
-                        print timeline_item['sourceItemId']
+                        logging.debug('sourceId:'+timeline_item['sourceItemId'])
                         if memcache.get(key=timeline_item['sourceItemId']):
                             memcache.delete(timeline_item['sourceItemId'])
-                            print 'refresh items'
-                            print data
+                            logging.debug('refresh items')
+                            logging.debug(data)
                             self._refresh_stream(mirror_service, token=token)
         self.response.set_status(200)
         self.response.out.write("")
@@ -188,7 +187,7 @@ class FeedlyHandler(webapp2.RequestHandler):
         if not token:
             token = self._get_auth_token()
         if token:
-            fa = FeedlyAPI('sandbox', FEEDLY_SECRET)
+            fa = FeedlyAPI(FEEDLY_USER, FEEDLY_SECRET)
             profile = fa.getProfile(token)
             if 'errorCode' in profile:
                 refresh_token = self._get_refresh_token()
@@ -198,7 +197,8 @@ class FeedlyHandler(webapp2.RequestHandler):
                     self._set_auth_token(token)
                     profile = fa.getProfile(None)
             userId = profile['id']
-            self._subscribeTimelineEvent(mirror_service)
+            if hasattr(self,'userid'):
+                self._subscribeTimelineEvent(mirror_service, self.userid)
             self._clearTimeline(mirror_service)
             cardCover = self._create_bundle_cover(1)
             cardRefresh = self._create_refresh_card(self._get_refresh_id(userId), 1)
@@ -206,15 +206,13 @@ class FeedlyHandler(webapp2.RequestHandler):
             batch.add(
                 mirror_service.timeline().insert(body=cardCover),
                 request_id=str(userId)+'-cover')
-            batch.add(
-                mirror_service.timeline().insert(body=cardRefresh),
-                request_id=str(userId)+'-refresh')
+
             feed_content = fa.getStreamContentUser(token, userId, count=5, unreadOnly='true')
-            print feed_content
+            logging.debug(feed_content)
             if feed_content['items']:
                 markEntryIds = []
                 for item in feed_content['items']:
-                    print item['title']
+                    logging.debug(item['title'])
                     image = None
                     if 'thumbnail' in item:
                         image = item['thumbnail'][0]['url']
@@ -226,6 +224,9 @@ class FeedlyHandler(webapp2.RequestHandler):
                     batch.add(
                         mirror_service.timeline().insert(body=body),
                         request_id=item['id'])
+                batch.add(
+                    mirror_service.timeline().insert(body=cardRefresh),
+                    request_id=str(userId)+'-refresh')
                 batch.execute(httplib2.Http())
                 fa.markAsRead(token, markEntryIds)
 
@@ -234,7 +235,7 @@ class FeedlyHandler(webapp2.RequestHandler):
         html = "<article class=\"photo\">\n"
         if image:
             html += '<img src="'+image+'" width="100%" height="100%"><div class="photo-overlay"/>'
-        html += '<section><div class="text-x-large"><p><strong class="blue">'+title+'</strong></div></section><footer><div><em class="yellow">'+source+'</em></p></div></footer></article>'
+        html += '<section><div class="text-x-large text-auto-size"><p><strong class="blue">'+title+'</strong></div></section><footer><div><em class="yellow">'+source+'</em></p></div></footer></article>'
 
         body = {
             'bundleId' : bundleId,
@@ -246,6 +247,7 @@ class FeedlyHandler(webapp2.RequestHandler):
                 {   'action' : 'CUSTOM',
                     'id': 'save',
                     'payload' : link,
+                    'removeWhenSelected' : True,
                     'values' : [{'displayName' : 'Save For Later',
                               'iconUrl': 'http://files.softicons.com/download/system-icons/web0.2ama-icons-by-chrfb/png/128x128/Bookmark.png'
                             }
@@ -259,9 +261,9 @@ class FeedlyHandler(webapp2.RequestHandler):
 #                            }
 #                    ]
 #                },
-                {
-                    'action' : 'DELETE'
-                }
+#                {
+#                    'action' : 'DELETE'
+#                }
             ],
             'html' : html
         }
@@ -271,6 +273,7 @@ class FeedlyHandler(webapp2.RequestHandler):
         body = {
             'bundleId' : bundleId,
             'isBundleCover' : True,
+            'isPinned' : True,
             'notification': {'level': 'DEFAULT'},
             'html' : '<img src="http://glass-apps.org/wp-content/uploads/2013/03/feedly-logo1.png" width="100%" height="100%"><section><p class="text-auto-size white">Feedly</p></section>',
 
@@ -278,7 +281,7 @@ class FeedlyHandler(webapp2.RequestHandler):
         return body
 
     def _create_refresh_card(self, id, bundleId):
-        print "refresh id:"+str(id)
+        logging.debug("refresh id:"+str(id))
         memcache.set(key=id, value=True)
         body = {
             'bundleId' : bundleId,
@@ -293,25 +296,25 @@ class FeedlyHandler(webapp2.RequestHandler):
                     ]
                 },
                 {
-                    'action' : 'DELETE'
+                    "action": "TOGGLE_PINNED"
                 }]
         }
         return body
 
-    def _subscribeTimelineEvent(self,mirror_service):
-        callback_url = 'https://mirrornotifications.appspot.com/forward?url=http://ec2-23-20-178-62.compute-1.amazonaws.com:28000/subscriptions'
-        #callback_url = 'https://feedly-glass.appspot.com/subscriptions'
+    def _subscribeTimelineEvent(self,mirror_service,userId):
+        #callback_url = 'https://mirrornotifications.appspot.com/forward?url=http://ec2-23-20-178-62.compute-1.amazonaws.com:28000/subscriptions'
+        callback_url = 'https://feedly-glass.appspot.com/subscriptions'
         subscriptions = mirror_service.subscriptions().list().execute()
         should_set = True
         for subscription in subscriptions.get('items', []):
             if subscription.get('collection') == 'timeline':
-                if subscription['callbackUrl'] == callback_url or subscription['userToken'] == self.userid:
+                if subscription['callbackUrl'] == callback_url or subscription['userToken'] == userId:
                     should_set = False
 
         if should_set:
             body = {
                 'collection': 'timeline',
-                'userToken': self.userid,
+                'userToken': userId,
                 'callbackUrl': callback_url
             }
             mirror_service.subscriptions().insert(body=body).execute()
@@ -332,5 +335,6 @@ class FeedlyHandler(webapp2.RequestHandler):
 MAIN_ROUTES = [
     ('/', LandingPage),
     ('/feeds', FeedlyHandler),
-    ('/subscriptions', FeedlyHandler)
+    ('/subscriptions', FeedlyHandler),
+    ('/notify', FeedlyHandler)
 ]

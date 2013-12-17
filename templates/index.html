@@ -19,7 +19,7 @@
                     <p><a class="btn btn-primary btn-lg" role="button" href="/auth" >Auth for Google Glass »</a></p>
                 {% endif %}
                 {% if google_auth and not feedly_auth %}
-                <p><a class="btn btn-primary btn-lg" role="button" href="http://sandbox.feedly.com/v3/auth/auth?response_type=code&client_id=sandbox&redirect_uri=http://localhost&scope=https%3A%2F%2Fcloud.feedly.com%2Fsubscriptions">Auth for Feedly »</a></p>
+                <p><a class="btn btn-primary btn-lg" role="button" href="http://cloud.feedly.com/v3/auth/auth?response_type=code&client_id={{ feedly_client_id }}&redirect_uri={{ feedly_redir }}&scope=https%3A%2F%2Fcloud.feedly.com%2Fsubscriptions">Auth for Feedly »</a></p>
                 {% elif feedly_auth %}
                 <p><a class="btn btn-success btn-lg" role="button" href="#">Feedly Authenticated</a></p>
                 <p><a class="btn  btn-primary btn-lg" role="button" href="/feeds">Push to Glass</a></p>
