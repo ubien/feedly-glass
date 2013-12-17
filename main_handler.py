@@ -218,6 +218,11 @@ class FeedlyHandler(webapp2.RequestHandler):
                         image = item['thumbnail'][0]['url']
                     elif 'visual' in item and 'url' in item['visual']:
                         image = item['visual']['url']
+                    elif 'summary' in item and 'content' in item['summary'] and 'src=' in item['summary']['content']:
+                        start_loc = item['summary']['content'].find('src="')
+                        end_loc = item['summary']['content'].find('"', start_loc+5)
+                        if start_loc != -1 and end_loc != -1:
+                            image = item['summary']['content'][start_loc+5:end_loc]
                     markEntryIds.append(item['id'])
                     source_id = self._get_source_id(userId,item['id'])
                     body = self._create_card(source_id, item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
