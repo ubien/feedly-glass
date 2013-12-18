@@ -34,3 +34,6 @@ class FeedlyUser(db.Model):
   id = db.StringProperty()
   feedly_access_token = db.StringProperty()
   feedly_refresh_token = db.StringProperty()
+
+class RefreshCards(db.Model):
+  id = db.StringProperty()

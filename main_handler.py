@@ -22,8 +22,6 @@ import logging
 import os
 import webapp2
 
-from google.appengine.api import memcache
-
 import httplib2
 import json
 from FeedlyKey import FEEDLY_USER, FEEDLY_SECRET
@@ -33,7 +31,7 @@ from apiclient.http import MediaIoBaseUpload
 from apiclient.http import BatchHttpRequest
 from oauth2client.appengine import StorageByKeyName
 from lib.FeedlySDK.FeedlyApi import FeedlyAPI
-from model import Credentials, FeedlyUser
+from model import Credentials, FeedlyUser, RefreshCards
 from google.appengine.ext import db
 import util
 
@@ -42,6 +40,8 @@ jinja_environment = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
 
 FEEDLY_REDIRECT = "https://feedly-glass.appspot.com" #http://localhost
+CARD_COVER_TITLE = "COVER"
+CARD_REFRESH_TITLE = "REFRESH"
 class _BatchCallback(object):
   """Class used to track batch request responses."""
 
@@ -128,8 +128,10 @@ class FeedlyHandler(webapp2.RequestHandler):
                         fa.addTagSave(id_parts['userId'], id_parts['entryId'], token)
                     elif action['payload'] == 'refresh':
                         logging.debug('sourceId:'+timeline_item['sourceItemId'])
-                        if memcache.get(key=timeline_item['sourceItemId']):
-                            memcache.delete(timeline_item['sourceItemId'])
+                        #refreshCard = db.GqlQuery("SELECT * FROM RefreshCards WHERE id = :1", timeline_item['sourceItemId']).get()
+                        #if memcache.get(key=timeline_item['sourceItemId']):
+                            #memcache.delete(timeline_item['sourceItemId'])
+                        if self._del_refresh_card(timeline_item['sourceItemId']):
                             logging.debug('refresh items')
                             logging.debug(data)
                             self._refresh_stream(mirror_service, token=token)
@@ -183,6 +185,16 @@ class FeedlyHandler(webapp2.RequestHandler):
     def _get_refresh_id(self, feedlyUserId):
         return feedlyUserId + "#REFRESH#"+str(randint(1,1000))
 
+    def _set_refresh_card(self, id):
+        RefreshCards(id=id).put()
+
+    def _del_refresh_card(self, id):
+        refreshCard = db.GqlQuery("SELECT * FROM RefreshCards WHERE id = :1", id).get()
+        if refreshCard:
+            refreshCard.delete()
+            return True
+        return False
+
     def _refresh_stream(self, mirror_service, token=None):
         if not token:
             token = self._get_auth_token()
@@ -199,13 +211,34 @@ class FeedlyHandler(webapp2.RequestHandler):
             userId = profile['id']
             if hasattr(self,'userid'):
                 self._subscribeTimelineEvent(mirror_service, self.userid)
-            self._clearTimeline(mirror_service)
-            cardCover = self._create_bundle_cover(1)
-            cardRefresh = self._create_refresh_card(self._get_refresh_id(userId), 1)
+            existing_cards = self._clearTimeline(mirror_service)
             batch = BatchHttpRequest()
-            batch.add(
-                mirror_service.timeline().insert(body=cardCover),
-                request_id=str(userId)+'-cover')
+            if not existing_cards[CARD_COVER_TITLE]:
+                cardCover = self._create_bundle_cover(1)
+                batch.add(
+                    mirror_service.timeline().insert(body=cardCover),
+                    request_id=str(userId)+'-cover'
+                )
+            else:
+                batch.add(
+                    mirror_service.timeline().update(id=existing_cards[CARD_COVER_TITLE]['id'], body=existing_cards[CARD_COVER_TITLE]),
+                    request_id=str(userId)+'-cover'
+                )
+            if not existing_cards[CARD_REFRESH_TITLE]:
+                cardRefresh = self._create_refresh_card(self._get_refresh_id(userId), 1)
+                batch.add(
+                    mirror_service.timeline().insert(body=cardRefresh),
+                    request_id=str(userId)+'-refresh'
+                )
+            else:
+                self._del_refresh_card(existing_cards[CARD_REFRESH_TITLE]['sourceItemId'])
+                id = self._get_refresh_id(userId)
+                self._set_refresh_card(id)
+                existing_cards[CARD_REFRESH_TITLE]['sourceItemId'] = id
+                batch.add(
+                    mirror_service.timeline().update(id=existing_cards[CARD_REFRESH_TITLE]['id'], body=existing_cards[CARD_REFRESH_TITLE]),
+                    request_id=str(userId)+'-refresh'
+                )
 
             feed_content = fa.getStreamContentUser(token, userId, count=5, unreadOnly='true')
             logging.debug(feed_content)
@@ -228,10 +261,8 @@ class FeedlyHandler(webapp2.RequestHandler):
                     body = self._create_card(source_id, item['title'], item['origin']['title'], image, item['alternate'][0]['href'], 1)
                     batch.add(
                         mirror_service.timeline().insert(body=body),
-                        request_id=item['id'])
-                batch.add(
-                    mirror_service.timeline().insert(body=cardRefresh),
-                    request_id=str(userId)+'-refresh')
+                        request_id=item['id']
+                    )
                 batch.execute(httplib2.Http())
                 fa.markAsRead(token, markEntryIds)
 
@@ -277,6 +308,7 @@ class FeedlyHandler(webapp2.RequestHandler):
     def _create_bundle_cover(self, bundleId):
         body = {
             'bundleId' : bundleId,
+            'title' : CARD_COVER_TITLE,
             'isBundleCover' : True,
             'isPinned' : True,
             'notification': {'level': 'DEFAULT'},
@@ -287,9 +319,11 @@ class FeedlyHandler(webapp2.RequestHandler):
 
     def _create_refresh_card(self, id, bundleId):
         logging.debug("refresh id:"+str(id))
-        memcache.set(key=id, value=True)
+        self._set_refresh_card(id)
+        #memcache.set(key=id, value=True)
         body = {
             'bundleId' : bundleId,
+            'title' : CARD_REFRESH_TITLE,
             'sourceItemId' : id,
             'html' : '<img src="http://blog.cachinko.com/blog/wp-content/uploads/2012/02/refresh.png" width="100%" height="100%"><div class="photo-overlay"/><section><p class="text-auto-size white">Refresh</p></section>',
             'menuItems' : [
@@ -325,17 +359,29 @@ class FeedlyHandler(webapp2.RequestHandler):
             mirror_service.subscriptions().insert(body=body).execute()
 
     def _clearTimeline(self, mirror_service):
+        existing_cards = {
+            CARD_REFRESH_TITLE : False,
+            CARD_COVER_TITLE : False
+        }
         timeline_items = mirror_service.timeline().list(maxResults=20).execute()
         cards = timeline_items.get('items', [])
-
         if cards:
             batch_responses = _BatchCallback()
             batch = BatchHttpRequest(batch_responses.callback)
+            run_request = False
             for card in cards:
-              batch.add(
-                  mirror_service.timeline().delete(id=card['id']),
-                  request_id=card['id'])
-            batch.execute(httplib2.Http())
+                if not 'title' in card:
+                    run_request = True
+                    batch.add(
+                        mirror_service.timeline().delete(id=card['id']),
+                        request_id=card['id'])
+                elif card['title'] == CARD_REFRESH_TITLE:
+                    existing_cards[CARD_REFRESH_TITLE] = card
+                elif card['title'] == CARD_COVER_TITLE:
+                    existing_cards[CARD_COVER_TITLE] = card
+            if run_request:
+                batch.execute(httplib2.Http())
+        return existing_cards
 
 MAIN_ROUTES = [
     ('/', LandingPage),
